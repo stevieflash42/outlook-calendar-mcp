@@ -354,7 +354,10 @@ def find_free_slots(
     work_start_time: str = "8:30",
     work_end_time: str = "17:30",
 ) -> str:
-    """Find free time slots on one or more days with a visual timeline.
+    """Find free time slots and plan pomodoro (pomodori) work sessions around existing calendar events, with a visual timeline.
+
+    Use this tool when the user asks to find pomodoros, plan pomodori, find free slots,
+    or schedule pomodoro time for a given day or date range.
 
     Args:
         start_date: Start date in YYYY-MM-DD format
