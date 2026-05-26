@@ -145,7 +145,14 @@ def _load_font(size):
     return ImageFont.load_default()
 
 
-def _build_day_timeline(date_str, work_start_hour, work_end_hour, slot_duration_minutes, break_duration_minutes, long_break_duration_minutes=15, pomodoros_before_long_break=4):
+def _parse_time(value) -> tuple[int, int]:
+    if isinstance(value, str) and ":" in value:
+        parts = value.split(":")
+        return int(parts[0]), int(parts[1])
+    return int(value), 0
+
+
+def _build_day_timeline(date_str, work_start_time, work_end_time, slot_duration_minutes, break_duration_minutes, long_break_duration_minutes=15, pomodoros_before_long_break=4):
     items = _get_calendar_items(date_str, date_str)
 
     busy_events = []
@@ -159,8 +166,10 @@ def _build_day_timeline(date_str, work_start_hour, work_end_hour, slot_duration_
     busy_events.sort(key=lambda x: x["start"])
 
     day = datetime.strptime(date_str, "%Y-%m-%d")
-    work_start = day.replace(hour=work_start_hour, minute=0)
-    work_end = day.replace(hour=work_end_hour, minute=0)
+    start_h, start_m = _parse_time(work_start_time)
+    end_h, end_m = _parse_time(work_end_time)
+    work_start = day.replace(hour=start_h, minute=start_m)
+    work_end = day.replace(hour=end_h, minute=end_m)
     slot_delta = timedelta(minutes=slot_duration_minutes)
     short_break_delta = timedelta(minutes=break_duration_minutes)
     long_break_delta = timedelta(minutes=long_break_duration_minutes)
@@ -336,8 +345,8 @@ def find_free_slots(
     break_duration_minutes: int = 5,
     long_break_duration_minutes: int = 15,
     pomodoros_before_long_break: int = 4,
-    work_start_hour: int = 9,
-    work_end_hour: int = 17,
+    work_start_time: str = "8:30",
+    work_end_time: str = "17:30",
 ) -> str:
     """Find free time slots on one or more days with a visual timeline.
 
@@ -348,8 +357,8 @@ def find_free_slots(
         break_duration_minutes: Short break between slots in minutes (default: 5)
         long_break_duration_minutes: Long break after every Nth pomodoro in minutes (default: 15)
         pomodoros_before_long_break: Number of pomodoros before a long break (default: 4)
-        work_start_hour: Work day start hour in 24h format (default: 9)
-        work_end_hour: Work day end hour in 24h format (default: 17)
+        work_start_time: Work day start time in H:MM or HH:MM format (default: 8:30)
+        work_end_time: Work day end time in H:MM or HH:MM format (default: 17:30)
     """
     if not end_date:
         end_date = start_date
@@ -364,7 +373,7 @@ def find_free_slots(
     while current_day <= last_day:
         date_str = current_day.strftime("%Y-%m-%d")
         timeline, pomodoro_count, work_start, work_end = _build_day_timeline(
-            date_str, work_start_hour, work_end_hour,
+            date_str, work_start_time, work_end_time,
             slot_duration_minutes, break_duration_minutes,
             long_break_duration_minutes, pomodoros_before_long_break,
         )
