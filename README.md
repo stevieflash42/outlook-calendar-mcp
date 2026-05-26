@@ -7,7 +7,7 @@ An MCP (Model Context Protocol) server that gives Claude Code read/write access 
 - Windows 10/11
 - Python 3.12+
 - **Classic Outlook** (not "New Outlook") installed and running with your account configured
-- [Claude Code](https://claude.ai/claude-code)
+- [Claude Code](https://claude.ai/download)
 
 > **Why classic Outlook?** New Outlook is a web app and doesn't expose calendars through COM/MAPI. Classic Outlook must be installed and have your accounts added, but you can continue using New Outlook as your daily client.
 
