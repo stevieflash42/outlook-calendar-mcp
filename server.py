@@ -386,7 +386,7 @@ def find_free_slots(
     lines.append(f"Total: {total_pomodoros} pomodoro(s) ({slot_duration_minutes} min work, {break_duration_minutes} min breaks)")
 
     _generate_schedule_image(days_data, slot_duration_minutes, break_duration_minutes)
-    subprocess.Popen(["code", SCHEDULE_IMAGE_PATH])
+    subprocess.Popen(["code", SCHEDULE_IMAGE_PATH], shell=True, creationflags=subprocess.DETACHED_PROCESS)
 
     return "\n".join(lines)
 
