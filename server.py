@@ -13,6 +13,7 @@ from mcp.server.fastmcp import FastMCP
 mcp = FastMCP("outlook-calendar")
 
 BUSY_STATUS_LABELS = ["Free", "Tentative", "Busy", "Out of Office", "Working Elsewhere"]
+SENSITIVITY_LABELS = {1: "Personal", 2: "Private", 3: "Confidential"}
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 
@@ -26,6 +27,10 @@ def _pytime_to_datetime(pytime) -> datetime:
         pytime.year, pytime.month, pytime.day,
         pytime.hour, pytime.minute, pytime.second,
     )
+
+
+def _get_display_subject(item) -> str:
+    return SENSITIVITY_LABELS.get(item.Sensitivity, item.Subject)
 
 
 def _load_config() -> dict:
@@ -161,7 +166,7 @@ def _build_day_timeline(date_str, work_start_time, work_end_time, slot_duration_
             continue
         start = _pytime_to_datetime(item.Start)
         end = _pytime_to_datetime(item.End)
-        busy_events.append({"start": start, "end": end, "subject": item.Subject})
+        busy_events.append({"start": start, "end": end, "subject": _get_display_subject(item)})
 
     busy_events.sort(key=lambda x: x["start"])
 
@@ -323,8 +328,9 @@ def list_events(start_date: str, end_date: str) -> str:
         start = _pytime_to_datetime(item.Start)
         end = _pytime_to_datetime(item.End)
         status = BUSY_STATUS_LABELS[item.BusyStatus] if item.BusyStatus < len(BUSY_STATUS_LABELS) else "Unknown"
+        subject = _get_display_subject(item)
         results.append(
-            f"- {item.Subject}\n"
+            f"- {subject}\n"
             f"  {start.strftime('%Y-%m-%d %I:%M %p')} to {end.strftime('%I:%M %p')}\n"
             f"  Location: {item.Location or '(none)'}\n"
             f"  Status: {status}\n"
