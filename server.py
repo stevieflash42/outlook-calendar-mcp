@@ -1,9 +1,12 @@
 import json
 import os
+import subprocess
+import tempfile
 
 import pythoncom
 import win32com.client
 from datetime import datetime, timedelta
+from PIL import Image, ImageDraw, ImageFont
 
 from mcp.server.fastmcp import FastMCP
 
@@ -114,6 +117,178 @@ def _get_calendar_items(start_date: str, end_date: str):
     return all_items
 
 
+SCHEDULE_IMAGE_PATH = os.path.join(tempfile.gettempdir(), "outlook-calendar-schedule.png")
+
+PX_PER_MIN = 1.5
+MIN_BLOCK_H = 24
+BLOCK_GAP = 2
+LEFT_MARGIN = 130
+BLOCK_WIDTH = 380
+RIGHT_MARGIN = 20
+IMG_WIDTH = LEFT_MARGIN + BLOCK_WIDTH + RIGHT_MARGIN
+
+BG = (13, 17, 23)
+BUSY_CLR = (218, 54, 51)
+POMO_CLR = (35, 134, 54)
+BREAK_CLR = (48, 54, 61)
+TEXT_CLR = (230, 237, 243)
+DIM_CLR = (125, 133, 144)
+
+
+def _load_font(size):
+    for name in ["segoeui.ttf", "arial.ttf", "calibri.ttf"]:
+        try:
+            return ImageFont.truetype(name, size)
+        except OSError:
+            continue
+    return ImageFont.load_default()
+
+
+def _build_day_timeline(date_str, work_start_hour, work_end_hour, slot_duration_minutes, break_duration_minutes):
+    items = _get_calendar_items(date_str, date_str)
+
+    busy_events = []
+    for item in items:
+        if item.BusyStatus == 0:
+            continue
+        start = _pytime_to_datetime(item.Start)
+        end = _pytime_to_datetime(item.End)
+        busy_events.append({"start": start, "end": end, "subject": item.Subject})
+
+    busy_events.sort(key=lambda x: x["start"])
+
+    day = datetime.strptime(date_str, "%Y-%m-%d")
+    work_start = day.replace(hour=work_start_hour, minute=0)
+    work_end = day.replace(hour=work_end_hour, minute=0)
+    slot_delta = timedelta(minutes=slot_duration_minutes)
+    break_delta = timedelta(minutes=break_duration_minutes)
+
+    timeline = []
+    pomodoro_count = 0
+    current = work_start
+
+    def _fill_pomodoros(current, gap_end):
+        nonlocal pomodoro_count
+        while current + slot_delta <= gap_end:
+            pomodoro_count += 1
+            pom_end = current + slot_delta
+            timeline.append(("slot", current, pom_end, f"Pomodoro {pomodoro_count}"))
+            current = pom_end
+            if current + break_delta + slot_delta <= gap_end:
+                timeline.append(("break", current, current + break_delta, ""))
+                current = current + break_delta
+            elif current < gap_end:
+                break
+        return current
+
+    for event in busy_events:
+        event_start = max(event["start"], work_start)
+        event_end = min(event["end"], work_end)
+
+        if event_end <= current:
+            continue
+        if event_start >= work_end:
+            break
+
+        if event_start > current:
+            current = _fill_pomodoros(current, event_start)
+
+        if current < event_start:
+            timeline.append(("break", current, event_start, ""))
+
+        timeline.append(("busy", event_start, event_end, event["subject"]))
+        current = max(current, event_end)
+
+    if current < work_end:
+        _fill_pomodoros(current, work_end)
+
+    return timeline, pomodoro_count, work_start, work_end
+
+
+def _generate_schedule_image(days_data, slot_duration, break_duration):
+    font_title = _load_font(20)
+    font_day = _load_font(16)
+    font_label = _load_font(13)
+    font_time = _load_font(11)
+
+    DAY_HEADER_H = 40
+    DAY_GAP = 20
+    top_margin = 50
+    bottom_margin = 70
+
+    total_height = top_margin
+    for day_info in days_data:
+        total_height += DAY_HEADER_H
+        for _, start, end, _ in day_info["timeline"]:
+            duration = int((end - start).total_seconds() / 60)
+            total_height += max(MIN_BLOCK_H, duration * PX_PER_MIN) + BLOCK_GAP
+        total_height += DAY_GAP
+
+    total_height += bottom_margin
+    img = Image.new("RGB", (IMG_WIDTH, int(total_height)), BG)
+    draw = ImageDraw.Draw(img)
+
+    total_pomodoros = sum(d["pomodoro_count"] for d in days_data)
+    num_days = len(days_data)
+    title = days_data[0]["date"] if num_days == 1 else f"{days_data[0]['date']} to {days_data[-1]['date']}"
+    draw.text((20, 16), f"Schedule for {title}", fill=TEXT_CLR, font=font_title)
+
+    y = top_margin
+    for day_info in days_data:
+        date_obj = datetime.strptime(day_info["date"], "%Y-%m-%d")
+        day_label = date_obj.strftime("%A, %b %d")
+        time_range = f"{day_info['work_start'].strftime('%I:%M %p')} – {day_info['work_end'].strftime('%I:%M %p')}"
+        pomo_label = f"  ({day_info['pomodoro_count']} pomodoros)"
+
+        draw.text((20, y + 10), day_label, fill=TEXT_CLR, font=font_day)
+        draw.text((20 + draw.textlength(day_label, font=font_day) + 10, y + 14), time_range, fill=DIM_CLR, font=font_time)
+        draw.text((20 + draw.textlength(day_label, font=font_day) + 10 + draw.textlength(time_range, font=font_time) + 8, y + 14), pomo_label, fill=POMO_CLR, font=font_time)
+        y += DAY_HEADER_H
+
+        entries = day_info["timeline"]
+        for i, (entry_type, start, end, label) in enumerate(entries):
+            duration = int((end - start).total_seconds() / 60)
+            h = max(MIN_BLOCK_H, duration * PX_PER_MIN)
+            color = BUSY_CLR if entry_type == "busy" else POMO_CLR if entry_type == "slot" else BREAK_CLR
+
+            draw.rounded_rectangle(
+                [LEFT_MARGIN, y, LEFT_MARGIN + BLOCK_WIDTH, y + h],
+                radius=5, fill=color,
+            )
+
+            start_str = start.strftime("%I:%M %p")
+            end_str = end.strftime("%I:%M %p")
+            next_starts_at_end = i + 1 < len(entries) and entries[i + 1][1] == end
+            draw.text((15, y + 4), start_str, fill=DIM_CLR, font=font_time)
+            if h >= 50 and not next_starts_at_end:
+                draw.text((15, y + h - 16), end_str, fill=DIM_CLR, font=font_time)
+
+            if h >= MIN_BLOCK_H and label:
+                max_chars = BLOCK_WIDTH // 8
+                display = (label[:max_chars - 3] + "...") if len(label) > max_chars else label
+                draw.text((LEFT_MARGIN + 10, y + (h - 13) / 2), display, fill=TEXT_CLR, font=font_label)
+
+            y += h + BLOCK_GAP
+
+        y += DAY_GAP
+
+    legend_y = y
+    legend_x = 20
+    for legend_label, legend_color in [("Busy", BUSY_CLR), ("Pomodoro", POMO_CLR), ("Break", BREAK_CLR)]:
+        draw.rounded_rectangle(
+            [legend_x, legend_y, legend_x + 12, legend_y + 12],
+            radius=2, fill=legend_color,
+        )
+        draw.text((legend_x + 18, legend_y - 1), legend_label, fill=DIM_CLR, font=font_label)
+        legend_x += 100
+
+    summary = f"{total_pomodoros} pomodoro(s) total ({slot_duration} min work, {break_duration} min breaks)"
+    draw.text((20, legend_y + 22), summary, fill=DIM_CLR, font=font_label)
+
+    img.save(SCHEDULE_IMAGE_PATH)
+    return SCHEDULE_IMAGE_PATH
+
+
 @mcp.tool()
 def list_events(start_date: str, end_date: str) -> str:
     """List calendar events in a date range.
@@ -145,61 +320,74 @@ def list_events(start_date: str, end_date: str) -> str:
 
 @mcp.tool()
 def find_free_slots(
-    date: str,
+    start_date: str,
+    end_date: str = "",
     slot_duration_minutes: int = 25,
+    break_duration_minutes: int = 5,
     work_start_hour: int = 9,
     work_end_hour: int = 17,
 ) -> str:
-    """Find free time slots on a given date.
+    """Find free time slots on one or more days with a visual timeline.
 
     Args:
-        date: Date in YYYY-MM-DD format
-        slot_duration_minutes: Minimum slot duration in minutes (default: 120)
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format (optional, defaults to start_date)
+        slot_duration_minutes: Work slot duration in minutes (default: 25)
+        break_duration_minutes: Break between slots in minutes (default: 5)
         work_start_hour: Work day start hour in 24h format (default: 9)
         work_end_hour: Work day end hour in 24h format (default: 17)
     """
-    restricted = _get_calendar_items(date, date)
+    if not end_date:
+        end_date = start_date
 
-    busy_periods = []
-    for item in restricted:
-        if item.BusyStatus == 0:
-            continue
-        start = _pytime_to_datetime(item.Start)
-        end = _pytime_to_datetime(item.End)
-        busy_periods.append((start, end))
+    current_day = datetime.strptime(start_date, "%Y-%m-%d")
+    last_day = datetime.strptime(end_date, "%Y-%m-%d")
 
-    busy_periods.sort(key=lambda x: x[0])
+    days_data = []
+    lines = []
+    total_pomodoros = 0
 
-    day = datetime.strptime(date, "%Y-%m-%d")
-    work_start = day.replace(hour=work_start_hour, minute=0)
-    work_end = day.replace(hour=work_end_hour, minute=0)
-    slot_delta = timedelta(minutes=slot_duration_minutes)
+    while current_day <= last_day:
+        date_str = current_day.strftime("%Y-%m-%d")
+        timeline, pomodoro_count, work_start, work_end = _build_day_timeline(
+            date_str, work_start_hour, work_end_hour,
+            slot_duration_minutes, break_duration_minutes,
+        )
 
-    free_slots = []
-    current = work_start
+        days_data.append({
+            "date": date_str,
+            "timeline": timeline,
+            "pomodoro_count": pomodoro_count,
+            "work_start": work_start,
+            "work_end": work_end,
+        })
 
-    for busy_start, busy_end in busy_periods:
-        if busy_end <= current:
-            continue
-        if busy_start >= work_end:
-            break
-        if busy_start > current:
-            gap_end = min(busy_start, work_end)
-            while current + slot_delta <= gap_end:
-                free_slots.append((current, current + slot_delta))
-                current = current + slot_delta
-        current = max(current, busy_end)
+        total_pomodoros += pomodoro_count
+        fmt = "%I:%M %p"
+        day_label = current_day.strftime("%A, %b %d")
+        lines.append(f"{day_label} ({work_start.strftime(fmt)} - {work_end.strftime(fmt)}):")
+        lines.append("")
 
-    while current + slot_delta <= work_end:
-        free_slots.append((current, current + slot_delta))
-        current = current + slot_delta
+        for entry_type, start, end, label in timeline:
+            s = start.strftime(fmt)
+            e = end.strftime(fmt)
+            if entry_type == "busy":
+                lines.append(f"  {s} - {e}  ██ {label}")
+            elif entry_type == "slot":
+                lines.append(f"  {s} - {e}  ░░ {label}")
+            elif entry_type == "break":
+                lines.append(f"  {s} - {e}  ·· break")
 
-    if not free_slots:
-        return f"No free {slot_duration_minutes}-minute slots on {date}."
+        lines.append(f"  ({pomodoro_count} pomodoros)")
+        lines.append("")
 
-    lines = [f"Free {slot_duration_minutes}-minute slots on {date}:"]
-    for i, (s, e) in enumerate(free_slots, 1):
-        lines.append(f"  {i}. {s.strftime('%I:%M %p')} - {e.strftime('%I:%M %p')}")
+        current_day += timedelta(days=1)
+
+    lines.append(f"Total: {total_pomodoros} pomodoro(s) ({slot_duration_minutes} min work, {break_duration_minutes} min breaks)")
+
+    _generate_schedule_image(days_data, slot_duration_minutes, break_duration_minutes)
+    subprocess.Popen(["code", SCHEDULE_IMAGE_PATH])
+
     return "\n".join(lines)
 
 
